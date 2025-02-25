@@ -11,13 +11,14 @@ class Transaction extends Model
 
     protected $fillable = [
         'user_id',
-        'transaction_type',
-        'provider',
-        'account_number',
+        'transaction_type', // e.g., airtime, data, cable, bill-payment
+        'provider',         // e.g., MTN, DSTV, PHCN
+        'account_number',   // Phone number, SmartCard ID, or Customer ID
         'amount',
-        'status',
+        'status',           // success, failed, pending
         'reference',
-        'metadata',
+        'message',          // Stores webhook response messages
+        'metadata',         // Additional response data
     ];
 
     protected $casts = [
