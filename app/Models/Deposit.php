@@ -18,6 +18,8 @@ class Deposit extends Model
         'user_id',
         'reference',
         'amount',
+        'transaction_charge',
+        'total_amount',
         'status',
     ];
 

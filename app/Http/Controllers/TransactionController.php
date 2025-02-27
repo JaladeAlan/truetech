@@ -74,34 +74,60 @@ class TransactionController extends Controller
             'dataType'   => 'required|string',
             'planId'     => 'required|string',
             'phone'      => 'required|string|min:10|max:15',
+            'amount'     => 'required|numeric|min:50', // Ensure amount is provided
         ]);
-    
+
         if ($validator->fails()) {
             return response()->json(['errors' => $validator->errors()], 422);
         }
-    
-        $dateTime = Carbon::now('Africa/Lagos')->format('YmdHi'); 
-    
+
+        $user = auth()->user(); // Get the authenticated user
+        $amount = $request->amount;
+
+        // Check if the user has enough balance
+        if ($user->balance < $amount) {
+            return response()->json(['error' => 'Insufficient balance'], 400);
+        }
+
+        // Deduct the amount from user's balance
+        $user->balance -= $amount;
+        $user->save();
+
+        // Generate reference number
+        $dateTime = Carbon::now('Africa/Lagos')->format('YmdHi');
         $randomString = Str::upper(Str::random(rand(13, 18)));
-    
         $reference = $dateTime . $randomString;
-    
+
         try {
-           
             $requestData = $request->all();
             $requestData['reference'] = $reference;
-    
+
+            // Make API request to Autopilot
             $response = AutopilotService::fetchFromAutoPilotAPI("data", $requestData);
-    
+
+            // Save the transaction in the database
+            Transaction::create([
+                'user_id'   => $user->id,
+                'reference' => $reference,
+                'amount'    => $amount,
+                'type'      => 'data', 
+                'status'    => 'successful'
+            ]);
+
             return response()->json([
                 'message'   => 'Data purchase successful',
                 'reference' => $reference,
                 'data'      => $response
             ], 200);
         } catch (\Exception $e) {
+            // Refund the balance if API request fails
+            $user->balance += $amount;
+            $user->save();
+
             return response()->json(['error' => 'Failed to purchase data: ' . $e->getMessage()], 500);
         }
     }
+
 
     /**
      * Get Airtime Types
@@ -125,7 +151,7 @@ class TransactionController extends Controller
     /**
      * Purchase Airtime
      */
-  public function purchaseAirtime(Request $request)
+    public function purchaseAirtime(Request $request)
     {
         $validator = Validator::make($request->all(), [
             'networkId'   => 'required|string',
@@ -133,31 +159,49 @@ class TransactionController extends Controller
             'amount'      => 'required|numeric|min:50',
             'phone'       => 'required|string|min:10|max:15',
         ]);
-
+    
         if ($validator->fails()) {
             return response()->json(['errors' => $validator->errors()], 422);
         }
-       
-        $dateTime = Carbon::now('Africa/Lagos')->format('YmdHi'); 
+    
+        $user = auth()->user();
+        $amount = $request->amount;
+    
+        // Check if user has enough balance
+        if ($user->balance < $amount) {
+            return response()->json(['error' => 'Insufficient balance'], 400);
+        }
+    
+        // Deduct the amount from the user's balance
+        $user->balance -= $amount;
+        $user->save();
+    
+        // Generate unique reference
+        $dateTime = Carbon::now('Africa/Lagos')->format('YmdHi');
         $randomString = Str::upper(Str::random(rand(13, 18)));
-        $reference = $dateTime . $randomString; 
-
+        $reference = $dateTime . $randomString;
+    
         try {
-           
             $requestData = $request->all();
             $requestData['reference'] = $reference;
-
+    
+            // Call Autopilot API
             $response = AutopilotService::fetchFromAutoPilotAPI("airtime", $requestData);
-
+    
             return response()->json([
                 'message'   => 'Airtime purchase successful',
                 'reference' => $reference,
                 'data'      => $response
             ], 200);
         } catch (\Exception $e) {
+            // If transaction fails, refund the balance
+            $user->balance += $amount;
+            $user->save();
+    
             return response()->json(['error' => 'Failed to purchase airtime: ' . $e->getMessage()], 500);
         }
     }
+    
 
      /**
      * Get Cable Providers
@@ -223,34 +267,51 @@ class TransactionController extends Controller
             'planId'       => 'required|string',
             'smartCardNo'  => 'required|string|min:6|max:20',
             'customerName' => 'required|string',
-            'paymentTypes'  => 'required|string|in:TOP_UP,FULL_PAYMENT',
+            'paymentTypes' => 'required|string|in:TOP_UP,FULL_PAYMENT',
             'amount'       => 'required_if:paymentType,TOP_UP|numeric|min:50',
         ]);
-
+    
         if ($validator->fails()) {
             return response()->json(['errors' => $validator->errors()], 422);
         }
-
-        // Generate unique reference: YYYYMMDDHHII + Random Alphanumeric (25-30 chars)
+    
+        $user = auth()->user();
+        $amount = $request->amount;
+    
+        // Check if user has enough balance
+        if ($user->balance < $amount) {
+            return response()->json(['error' => 'Insufficient balance'], 400);
+        }
+    
+        // Deduct the amount from the user's balance
+        $user->balance -= $amount;
+        $user->save();
+    
+        // Generate unique reference
         $dateTime = Carbon::now('Africa/Lagos')->format('YmdHi');
         $randomString = Str::upper(Str::random(rand(13, 18)));
         $reference = $dateTime . $randomString;
-
+    
         try {
             $requestData = $request->all();
             $requestData['reference'] = $reference;
-
+    
+            // Call Autopilot API
             $response = AutopilotService::fetchFromAutoPilotAPI("cable", $requestData);
-
+    
             return response()->json([
                 'message'   => 'Cable subscription successful',
                 'reference' => $reference,
                 'data'      => $response
             ], 200);
         } catch (\Exception $e) {
+            // If transaction fails, refund the balance
+            $user->balance += $amount;
+            $user->save();
+    
             return response()->json(['error' => 'Failed to purchase cable subscription: ' . $e->getMessage()], 500);
         }
-    }
+    } 
     
     /**
      * Get Billers
@@ -323,7 +384,19 @@ class TransactionController extends Controller
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
-        // Generate unique reference: YYYYMMDDHHII + Random Alphanumeric (13-18 chars)
+        $user = auth()->user();
+        $amount = $request->amount;
+
+        // Check if user has enough balance
+        if ($user->balance < $amount) {
+            return response()->json(['error' => 'Insufficient balance'], 400);
+        }
+
+        // Deduct the amount from the user's balance
+        $user->balance -= $amount;
+        $user->save();
+
+        // Generate unique reference
         $dateTime = Carbon::now('Africa/Lagos')->format('YmdHi');
         $randomString = Str::upper(Str::random(rand(13, 18)));
         $reference = $dateTime . $randomString;
@@ -332,6 +405,7 @@ class TransactionController extends Controller
             $requestData = $request->all();
             $requestData['reference'] = $reference;
 
+            // Call Autopilot API
             $response = AutopilotService::fetchFromAutoPilotAPI("bill-payment", $requestData);
 
             return response()->json([
@@ -340,7 +414,12 @@ class TransactionController extends Controller
                 'data'      => $response
             ], 200);
         } catch (\Exception $e) {
+            // If transaction fails, refund the balance
+            $user->balance += $amount;
+            $user->save();
+
             return response()->json(['error' => 'Failed to pay bill: ' . $e->getMessage()], 500);
         }
     }
+
 }

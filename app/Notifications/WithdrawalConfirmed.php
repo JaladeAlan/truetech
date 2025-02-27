@@ -3,11 +3,13 @@
 namespace App\Notifications;
 
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Notification;
 use Illuminate\Notifications\Messages\MailMessage;
+use Illuminate\Notifications\Messages\BroadcastMessage;
 use App\Models\Withdrawal;
 
-class WithdrawalConfirmed extends Notification
+class WithdrawalConfirmed extends Notification implements ShouldQueue
 {
     use Queueable;
 
@@ -20,7 +22,7 @@ class WithdrawalConfirmed extends Notification
 
     public function via($notifiable)
     {
-        return ['mail'];
+        return ['mail', 'database', 'broadcast'];
     }
 
     public function toMail($notifiable)
@@ -34,4 +36,24 @@ class WithdrawalConfirmed extends Notification
             ->line('Thank you for using our application!')
             ->salutation('Best regards, ' . config('app.name'));
     }
+
+    public function toArray($notifiable)
+    {
+        return [
+            'message' => 'Your withdrawal of ₦' . number_format($this->withdrawal->amount, 2) . ' has been successfully processed.',
+            'reference' => $this->withdrawal->reference,
+            'amount' => $this->withdrawal->amount,
+            'status' => 'completed',
+            'processed_at' => now(),
+        ];
+    }
+
+    // public function toBroadcast($notifiable)
+    // {
+    //     return new BroadcastMessage([
+    //         'message' => 'Your withdrawal of ₦' . number_format($this->withdrawal->amount, 2) . ' has been successfully processed.',
+    //         'reference' => $this->withdrawal->reference,
+    //         'amount' => $this->withdrawal->amount,
+    //     ]);
+    // }
 }

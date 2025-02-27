@@ -61,6 +61,11 @@ Route::middleware(['jwt.auth'])->group(function () {
 
     // Referral System
     Route::get('/user/referrals', [UserController::class, 'getReferralStats']);
+    
+    //User notifications
+    Route::get('/notifications', [NotificationController::class, 'getNotifications']);
+    Route::get('/notifications/unread', [NotificationController::class, 'getUnreadNotifications']);
+    Route::post('/notifications/read', [NotificationController::class, 'markAllAsRead']);
 
     // ---------------- AUTOPILOT TRANSACTIONS ----------------
     Route::post('/airtime/purchase', [TransactionController::class, 'purchaseAirtime']);
