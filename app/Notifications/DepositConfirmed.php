@@ -30,20 +30,25 @@ class DepositConfirmed extends Notification implements ShouldQueue
         return (new MailMessage)
             ->subject('Deposit Confirmation')
             ->greeting('Hello ' . $notifiable->name . '!')
-            ->line('Your deposit of ₦' . number_format($this->amount, 2) . ' was successfully processed.')
+            ->line('Your deposit of ₦ ' . number_format($this->amount, 2) . ' was successfully processed.')
             ->action('View Account', url('/account'))
             ->line('Thank you for using our application!')
             ->salutation('Best regards, ' . config('app.name'));
     }
 
-    public function toArray($notifiable)
+    public function toDatabase($notifiable)
     {
         return [
-            'message' => 'Your deposit of ₦' . number_format($this->amount, 2) . ' was successful.',
+            'message' => 'Your deposit of ₦ ' . number_format($this->amount, 2) . ' was successful.',
             'amount' => $this->amount,
             'type' => 'deposit',
             'timestamp' => now(),
         ];
+    }
+
+    public function toArray($notifiable)
+    {
+        return $this->toDatabase($notifiable);
     }
 
     // public function toBroadcast($notifiable)

@@ -91,40 +91,42 @@ class DepositController extends Controller
     public function handleDepositCallback(Request $request)
     {
         Log::info("Deposit callback accessed", ['method' => $request->method()]);
-
+    
         $reference = $request->query('reference');
         $paystackUrl = 'https://api.paystack.co/transaction/verify/' . $reference;
-
+    
         $response = Http::withHeaders([
             'Authorization' => 'Bearer ' . env('PAYSTACK_SECRET_KEY'),
         ])->get($paystackUrl);
-
+    
         Log::info("Paystack response for deposit verification", ['response' => $response->json(), 'reference' => $reference]);
-
+    
         if ($response->successful() && $response['data']['status'] === 'success') {
             $amount = $response['data']['amount'] / 100; 
             $userEmail = $response['data']['customer']['email'];
-
+    
             $user = User::where('email', $userEmail)->first();
             if (!$user) return response()->json(['error' => 'User not found'], 404);
-
+    
             $deposit = Deposit::where('reference', $reference)->first();
             if (!$deposit) return response()->json(['error' => 'Deposit record not found'], 404);
-
+    
             try {
                 DB::transaction(function () use ($user, $amount, $deposit) {
                     Log::info("Before incrementing balance", ['user_id' => $user->id, 'current_balance' => $user->balance, 'deposit_amount' => $deposit->amount]);
-
+    
                     $user->increment('balance', (float) $deposit->amount);
-                    
                     Log::info("After incrementing balance", ['user_id' => $user->id, 'new_balance' => $user->fresh()->balance]);
-                    
+    
                     $deposit->update(['status' => 'completed']);
-                    
+    
                     try {
                         Log::info("Sending notification to user", ['user_id' => $user->id, 'amount' => $amount]);
-                        $user->notify(new DepositConfirmed($amount));
-                        Log::info("Notification sent");                      
+    
+                        $notification = new DepositConfirmed($amount); // Define notification
+                        $user->notify($notification); // Send notification
+    
+                        Log::info("Notification sent", ['notification_data' => $notification->toDatabase($user)]);              
                     } catch (\Exception $e) {
                         Log::error("Failed to send deposit notification", [
                             'error' => $e->getMessage(),
@@ -133,13 +135,13 @@ class DepositController extends Controller
                             'deposit_reference' => $deposit->reference,
                         ]);
                     }
-
+    
                     Log::info("Deposit successful", ['user_id' => $user->id, 'amount' => $amount]);
-
+    
                     // Initiate Transfer to Third-Party Bank
                     $this->transferToThirdParty($amount);
                 });
-
+    
                 return response()->json(['message' => 'Deposit successful', 'amount' => $deposit->amount]);
             } catch (\Exception $e) {
                 Log::error("Database error on deposit", ['error' => $e->getMessage(), 'user_id' => $user->id]);
@@ -147,29 +149,36 @@ class DepositController extends Controller
             }
         } else {
             Log::error("Deposit verification failed", ['reference' => $reference, 'response' => $response->json()]);
-
+    
             $deposit = Deposit::where('reference', $reference)->first();
             if ($deposit) {
                 $deposit->update(['status' => 'failed']);
             }
-
-            $user = User::find($deposit->user_id);
-            if ($user) {
-                try {
-                    $user->notify(new DepositFailedNotification($deposit));
-                } catch (\Exception $e) {
-                    Log::error("Failed to send deposit failed notification", [
-                        'error' => $e->getMessage(),
-                        'user_id' => $user->id,
-                        'deposit_reference' => $deposit->reference,
-                    ]);
+    
+            if ($deposit && $deposit->user_id) {
+                $user = User::find($deposit->user_id);
+                if ($user) {
+                    try {
+                        Log::info("Sending deposit failed notification", ['user_id' => $user->id, 'deposit_reference' => $deposit->reference]);
+    
+                        $failedNotification = new DepositFailedNotification($deposit);
+                        $user->notify($failedNotification);
+    
+                        Log::info("Deposit failed notification sent", ['notification_data' => $failedNotification->toDatabase($user)]);
+                    } catch (\Exception $e) {
+                        Log::error("Failed to send deposit failed notification", [
+                            'error' => $e->getMessage(),
+                            'user_id' => $user->id,
+                            'deposit_reference' => $deposit->reference,
+                        ]);
+                    }
                 }
             }
-
+    
             return response()->json(['error' => 'Deposit verification failed'], 400);
         }
     }
-
+    
     // Transfer deposit to third-party account
     private function transferToThirdParty($amount)
     {

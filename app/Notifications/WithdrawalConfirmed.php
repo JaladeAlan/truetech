@@ -30,24 +30,28 @@ class WithdrawalConfirmed extends Notification implements ShouldQueue
         return (new MailMessage)
             ->subject('Withdrawal Confirmation')
             ->greeting('Hello ' . $notifiable->name . '!')
-            ->line('Your withdrawal of ₦' . number_format($this->withdrawal->amount, 2) . ' has been successfully processed.')
+            ->line('Your withdrawal of ₦ ' . number_format($this->withdrawal->amount, 2) . ' has been successfully processed.')
             ->line('Transaction Reference: ' . $this->withdrawal->reference)
             ->action('View Account', url('/account'))
             ->line('Thank you for using our application!')
             ->salutation('Best regards, ' . config('app.name'));
     }
 
-    public function toArray($notifiable)
+    public function toDatabase($notifiable)
     {
         return [
-            'message' => 'Your withdrawal of ₦' . number_format($this->withdrawal->amount, 2) . ' has been successfully processed.',
+            'message' => 'Your withdrawal of ₦ ' . number_format($this->withdrawal->amount, 2) . ' has been successfully processed.',
             'reference' => $this->withdrawal->reference,
             'amount' => $this->withdrawal->amount,
             'status' => 'completed',
             'processed_at' => now(),
         ];
     }
-
+    
+    public function toArray($notifiable)
+    {
+        return $this->toDatabase($notifiable);
+    }
     // public function toBroadcast($notifiable)
     // {
     //     return new BroadcastMessage([

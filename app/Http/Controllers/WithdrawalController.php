@@ -32,13 +32,19 @@ class WithdrawalController extends Controller
             return response()->json(['error' => 'Bank details are missing'], 400);
         }
 
-        // Prevent duplicate withdrawal requests while one is pending
-        if (Withdrawal::where('user_id', $user->id)->where('status', 'pending')->exists()) {
-            return response()->json(['error' => 'You already have a pending withdrawal'], 400);
-        }
+        // if (Withdrawal::where('user_id', $user->id)->where('status', 'pending')->exists()) {
+        //     return response()->json(['error' => 'You already have a pending withdrawal'], 400);
+        // }
 
         try {
             $referenceCode = 'WD-' . now()->format('Ymd-His') . '-' . Str::random(6);
+
+            // Log balance before withdrawal
+            Log::info('User balance before withdrawal', [
+                'user_id' => $user->id,
+                'balance' => $user->balance,
+                'withdrawal_amount' => $request->amount,
+            ]);
 
             DB::transaction(function () use ($user, $request, $referenceCode) {
                 $user->decrement('balance', $request->amount);
@@ -50,6 +56,12 @@ class WithdrawalController extends Controller
                     'reference' => $referenceCode,
                 ]);
             });
+
+              // Log balance after withdrawal
+            Log::info('User balance after withdrawal', [
+                'user_id' => $user->id,
+                'balance' => $user->fresh()->balance, 
+            ]);
 
             Log::info('Withdrawal initiated', [
                 'user_id' => $user->id,
@@ -74,7 +86,6 @@ class WithdrawalController extends Controller
         }
     }
 
-    // Simulate Paystack transfer in test mode
     protected function simulateTestWithdrawal($referenceCode)
     {
         Log::info('Simulating test mode withdrawal', ['reference' => $referenceCode]);
@@ -93,7 +104,6 @@ class WithdrawalController extends Controller
         ], 200);
     }
 
-    // Initiate the transfer with Paystack
     protected function initiatePaystackTransfer($user, $amount, $referenceCode)
     {
         Log::info('Initiating transfer with Paystack', [
@@ -103,38 +113,26 @@ class WithdrawalController extends Controller
             'reference' => $referenceCode,
         ]);
 
-        // Retrieve or create the Paystack recipient code
         $recipientCode = $this->getOrCreatePaystackRecipient($user);
-
-        Log::info('Paystack recipient code:', ['recipient_code' => $recipientCode]);
 
         $transferResponse = Http::withToken(config('services.paystack.secret_key'))
             ->post('https://api.paystack.co/transfer', [
                 'source' => 'balance',
-                'amount' => $amount * 100, // Convert to kobo
+                'amount' => $amount * 100,
                 'recipient' => $recipientCode,
                 'reference' => $referenceCode,
             ]);
 
         if (!$transferResponse->successful()) {
-            Log::error('Transfer initiation failed', ['response' => $transferResponse->json()]);
             throw new \Exception('Transfer initiation failed: ' . $transferResponse->json()['message']);
         }
-
-        Log::info('Paystack transfer successful', ['response' => $transferResponse->json()]);
     }
 
-    // Get or Create Paystack Transfer Recipient
     protected function getOrCreatePaystackRecipient($user)
     {
-        if ($user->recipient_code) {
-            return $user->recipient_code;
-        }
-
-        return $this->createPaystackRecipient($user);
+        return $user->recipient_code ?? $this->createPaystackRecipient($user);
     }
 
-    // Create Paystack Transfer Recipient
     protected function createPaystackRecipient($user)
     {
         $recipientResponse = Http::withToken(config('services.paystack.secret_key'))
@@ -147,18 +145,16 @@ class WithdrawalController extends Controller
             ]);
 
         if (!$recipientResponse->successful()) {
-            Log::error('Failed to create transfer recipient', ['response' => $recipientResponse->json()]);
             throw new \Exception('Failed to create transfer recipient: ' . $recipientResponse->json()['message']);
         }
 
         $recipientCode = $recipientResponse->json()['data']['recipient_code'];
-        $user->update(['recipient_code' => $recipientCode]); // Store recipient code in DB
+        $user->update(['recipient_code' => $recipientCode]);
 
         return $recipientCode;
     }
 
-    // Handle Paystack Webhook for Transfer Updates
-    public function handlePaystackCallback(Request $request)
+   public function handlePaystackCallback(Request $request)
     {
         if (!config('services.paystack.test_mode')) {
             $payload = file_get_contents('php://input'); 
@@ -188,19 +184,51 @@ class WithdrawalController extends Controller
                 $withdrawal->update(['status' => 'completed']);
 
                 try {
-                    $withdrawal->user->notify(new WithdrawalConfirmed($withdrawal));
+                    Log::info("Sending withdrawal confirmation notification", [
+                        'user_id' => $withdrawal->user->id,
+                        'amount' => $withdrawal->amount,
+                        'withdrawal_reference' => $withdrawal->reference,
+                    ]);
+                
+                    $notification = new WithdrawalConfirmed($withdrawal);
+                    $withdrawal->user->notify($notification);
+                
+                    Log::info("Withdrawal confirmation notification sent", [
+                        'notification_data' => $notification->toDatabase($withdrawal->user),
+                    ]);
                 } catch (\Exception $e) {
-                    Log::error('Failed to send withdrawal confirmation email', ['error' => $e->getMessage()]);
-                }
+                    Log::error("Failed to send withdrawal confirmation notification", [
+                        'error' => $e->getMessage(),
+                        'user_id' => $withdrawal->user->id,
+                        'amount' => $withdrawal->amount,
+                        'withdrawal_reference' => $withdrawal->reference,
+                    ]);
+                }                
             } elseif ($status === 'failed') {
                 $withdrawal->user->increment('balance', $withdrawal->amount);
                 $withdrawal->update(['status' => 'failed']);
 
                 try {
-                    $withdrawal->user->notify(new WithdrawalFailedNotification($withdrawal));
+                    Log::info("Sending withdrawal failure notification", [
+                        'user_id' => $withdrawal->user->id,
+                        'amount' => $withdrawal->amount,
+                        'withdrawal_reference' => $withdrawal->reference,
+                    ]);
+                
+                    $notification = new WithdrawalFailedNotification($withdrawal);
+                    $withdrawal->user->notify($notification);
+                
+                    Log::info("Withdrawal failure notification sent", [
+                        'notification_data' => $notification->toDatabase($withdrawal->user),
+                    ]);
                 } catch (\Exception $e) {
-                    Log::error('Failed to send withdrawal failed email', ['error' => $e->getMessage()]);
-                }
+                    Log::error("Failed to send withdrawal failure notification", [
+                        'error' => $e->getMessage(),
+                        'user_id' => $withdrawal->user->id,
+                        'amount' => $withdrawal->amount,
+                        'withdrawal_reference' => $withdrawal->reference,
+                    ]);
+                }                
             } else {
                 Log::warning('Unexpected Paystack withdrawal status', ['status' => $status]);
             }
@@ -209,7 +237,6 @@ class WithdrawalController extends Controller
         return response()->json(['status' => 'Callback handled']);
     }
 
-    // Get Withdrawal Status
     public function getWithdrawalStatus($reference)
     {
         $withdrawal = Withdrawal::firstWhere('reference', $reference);
