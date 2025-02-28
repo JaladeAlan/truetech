@@ -54,14 +54,15 @@ Route::middleware(['jwt.auth'])->group(function () {
     Route::post('/withdraw', [WithdrawalController::class, 'initiateWithdrawal']);
     Route::post('/withdrawal/request', [WithdrawalController::class, 'requestWithdrawal']);
     Route::get('/withdrawals/{reference}', [WithdrawalController::class, 'getWithdrawalStatus']);
-
+    Route::get('/withdrawal/retry', [WithdrawalController::class, 'retryPendingWithdrawals']);
+   
     // Transaction PIN
     Route::post('/pin/set', [UserController::class, 'setTransactionPin']);
     Route::post('/pin/update', [UserController::class, 'updateTransactionPin']);
 
     // Referral System
     Route::get('/user/referrals', [UserController::class, 'getReferralStats']);
-    
+
     //User notifications
     Route::get('/notifications', [NotificationController::class, 'getNotifications']);
     Route::get('/notifications/unread', [NotificationController::class, 'getUnreadNotifications']);

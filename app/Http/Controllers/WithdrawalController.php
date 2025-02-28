@@ -239,17 +239,84 @@ class WithdrawalController extends Controller
 
     public function getWithdrawalStatus($reference)
     {
+        Log::info("Checking withdrawal status for reference: " . $reference);
+    
         $withdrawal = Withdrawal::firstWhere('reference', $reference);
-
+    
         if (!$withdrawal) {
-            return response()->json(['error' => 'Withdrawal not found'], 404);
+            Log::error("Withdrawals not found", ['reference' => $reference]);
+            return response()->json(['error' => 'Withdrawalsss not found'], 404);
         }
-
+    
         return response()->json([
             'status' => $withdrawal->status,
             'amount' => $withdrawal->amount,
             'requested_at' => $withdrawal->created_at,
             'completed_at' => $withdrawal->updated_at,
         ], 200);
-    }
+    }   
+
+    public function retryPendingWithdrawals()
+    {
+        $pendingWithdrawals = Withdrawal::where('status', 'pending')->get();
+    
+        if ($pendingWithdrawals->isEmpty()) {
+            Log::info('No pending withdrawals to retry');
+            return response()->json(['message' => 'No pending withdrawals to retry'], 200);
+        }
+    
+        Log::info('Pending withdrawals found', [
+            'withdrawals' => $pendingWithdrawals->map(function ($withdrawal) {
+                return [
+                    'id' => $withdrawal->id,
+                    'user_id' => $withdrawal->user_id,
+                    'amount' => $withdrawal->amount,
+                    'reference' => $withdrawal->reference,
+                    'status' => $withdrawal->status
+                ];
+            })
+        ]);
+    
+        foreach ($pendingWithdrawals as $withdrawal) {
+            if (!$withdrawal->reference) {
+                Log::error('Skipping withdrawal due to missing reference', [
+                    'withdrawal_id' => $withdrawal->id
+                ]);
+                continue;
+            }
+    
+            // Ensure the withdrawal exists before proceeding
+            $existingWithdrawal = Withdrawal::where('reference', $withdrawal->reference)->first();
+            if (!$existingWithdrawal) {
+                Log::error("Withdrawal not found in database", [
+                    'reference' => $withdrawal->reference
+                ]);
+                continue;
+            }
+    
+            try {
+                Log::info('Retrying withdrawal', [
+                    'withdrawal_id' => $withdrawal->id,
+                    'user_id' => $withdrawal->user_id,
+                    'amount' => $withdrawal->amount,
+                    'reference' => $withdrawal->reference
+                ]);
+    
+                // Re-trigger the withdrawal attempt
+                $this->initiatePaystackTransfer($withdrawal->user, $withdrawal->amount, $withdrawal->reference);
+    
+                Log::info('Withdrawal retried successfully', ['reference' => $withdrawal->reference]);
+    
+            } catch (\Exception $e) {
+                Log::error('Failed to retry withdrawal', [
+                    'withdrawal_id' => $withdrawal->id,
+                    'reference' => $withdrawal->reference,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+    
+        return response()->json(['message' => 'Pending withdrawals retried'], 200);
+    }    
+      
 }
