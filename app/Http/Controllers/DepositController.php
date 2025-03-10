@@ -36,74 +36,114 @@ class DepositController extends Controller
         }
 
         $request->validate([
-            'amount' => 'required|numeric|min:1',
+            'amount' => 'required|numeric|min:100',
         ]);
-
-        $amount = $request->amount;
-        $transactionCharge = 50; 
-        $totalAmount = $amount + $transactionCharge;
-
-        $paystackUrl = 'https://api.paystack.co/transaction/initialize';
+    
+        $userInputAmount = (float) $request->amount;
+        $transactionChargePercent = 2.2 / 100; // 2.2% transaction fee
+    
+        // Calculate the total amount user needs to pay
+        $totalAmount = round($userInputAmount / (1 - $transactionChargePercent), 2);
+        $transactionFee = round($totalAmount - $userInputAmount, 2);
+        
         $reference = 'DEPOSIT-' . uniqid();
-        $callbackUrl = URL::temporarySignedRoute('deposit.callback', now()->addMinutes(10), ['reference' => $reference]);
-
+    
+        $monnifyUrl = 'https://api.monnify.com/api/v1/transactions/init-transaction';
+        
         $response = Http::withHeaders([
-            'Authorization' => 'Bearer ' . env('PAYSTACK_SECRET_KEY'),
-        ])->post($paystackUrl, [
-            'email' => $user->email,
-            'amount' => $totalAmount * 100, 
-            'callback_url' => $callbackUrl,
-            'reference' => $reference,
+            'Authorization' => 'Bearer ' . $this->getMonnifyToken(),
+            'Content-Type' => 'application/json',
+        ])->post($monnifyUrl, [
+            'amount' => $totalAmount,
+            'customerEmail' => $user->email,
+            'paymentReference' => $reference,
+            'paymentDescription' => "Deposit for {$user->name}",
+            'currencyCode' => 'NGN',
+            'contractCode' => env('MONNIFY_CONTRACT_CODE'),
+            'redirectUrl' => route('deposit.callback', ['reference' => $reference]),
+            'paymentMethods' => ['CARD', 'ACCOUNT_TRANSFER'],
+            'incomeSplitConfig' => [
+                [
+                    'subAccountCode' => env('MONNIFY_SUBACCOUNT_CODE'),
+                    'feeBearer' => false,
+                    'splitAmount' => $userInputAmount,
+                ],
+                [
+                    'subAccountCode' => env('MONNIFY_PLATFORM_ACCOUNT'),
+                    'feeBearer' => true,
+                    'splitAmount' => $transactionFee,
+                ]
+            ]
         ]);
 
+        Log::info('Monnify Response', ['response' => $response->json()]);
+    
         if ($response->successful()) {
             Log::info("Deposit initiated successfully", [
                 'reference' => $reference,
                 'user_id' => $user->id,
-                'amount' => $amount,
-                'transaction_charge' => $transactionCharge,
+                'amount' => $userInputAmount,
+                'transaction_charge' => $transactionFee,
                 'total_amount_paid' => $totalAmount
             ]); 
-
+    
+            $data = $response->json()['responseBody'];
+            
             Deposit::create([
                 'user_id' => $user->id,
                 'reference' => $reference,
-                'amount' => $amount,
-                'transaction_charge' => $transactionCharge,
+                'amount' => $userInputAmount,
+                'transaction_charge' => $transactionFee,
                 'total_amount' => $totalAmount,
                 'status' => 'pending'
             ]);
-
+    
             return response()->json([
-                'payment_url' => $response['data']['authorization_url'],
+                'payment_url' => $data['checkoutUrl'],
                 'reference' => $reference,
-                'amount' => $amount,
-                'transaction_charge' => $transactionCharge,
+                'amount' => $userInputAmount,
+                'transaction_charge' => $transactionFee,
                 'total_amount' => $totalAmount,
+            ]);
+            Log::info('Deposit Created', [
+                'user_id' => $user->id, 'reference' => $reference, 'amount' => $userInputAmount
             ]);
         } else {
             Log::error('Failed to initiate deposit', ['response' => $response->json(), 'user_id' => $user->id]);
             return response()->json(['error' => 'Failed to initiate deposit'], 500);
         }
-    }    
-
+    }
+    
     // Handle deposit callback
     public function handleDepositCallback(Request $request)
     {
         Log::info("Deposit callback accessed", ['method' => $request->method()]);
     
-        $reference = $request->query('reference');
-        $paystackUrl = 'https://api.paystack.co/transaction/verify/' . $reference;
+        $reference = $request->query('paymentReference');
+        $monnifyUrl = 'https://api.monnify.com/api/v1/transactions/' . $reference;
     
+        // Authenticate with Monnify to get bearer token
+        $authResponse = Http::withBasicAuth(env('MONNIFY_API_KEY'), env('MONNIFY_SECRET_KEY'))
+            ->post('https://api.monnify.com/api/v1/auth/login')
+            ->json();
+    
+        if (!$authResponse || !$authResponse['requestSuccessful']) {
+            Log::error("Monnify authentication failed", ['response' => $authResponse]);
+            return response()->json(['error' => 'Failed to authenticate with Monnify'], 500);
+        }
+    
+        $accessToken = $authResponse['responseBody']['accessToken'];
+    
+        // Verify transaction status
         $response = Http::withHeaders([
-            'Authorization' => 'Bearer ' . env('PAYSTACK_SECRET_KEY'),
-        ])->get($paystackUrl);
+            'Authorization' => 'Bearer ' . $accessToken,
+        ])->get($monnifyUrl);
     
-        Log::info("Paystack response for deposit verification", ['response' => $response->json(), 'reference' => $reference]);
+        Log::info("Monnify response for deposit verification", ['response' => $response->json(), 'reference' => $reference]);
     
-        if ($response->successful() && $response['data']['status'] === 'success') {
-            $amount = $response['data']['amount'] / 100; 
-            $userEmail = $response['data']['customer']['email'];
+        if ($response->successful() && $response['responseBody']['paymentStatus'] === 'PAID') {
+            $amount = $response['responseBody']['amountPaid'];
+            $userEmail = $response['responseBody']['customer']['email'];
     
             $user = User::where('email', $userEmail)->first();
             if (!$user) return response()->json(['error' => 'User not found'], 404);
@@ -113,20 +153,27 @@ class DepositController extends Controller
     
             try {
                 DB::transaction(function () use ($user, $amount, $deposit) {
-                    Log::info("Before incrementing balance", ['user_id' => $user->id, 'current_balance' => $user->balance, 'deposit_amount' => $deposit->amount]);
+                    Log::info("Before incrementing balance", [
+                        'user_id' => $user->id,
+                        'current_balance' => $user->balance,
+                        'deposit_amount' => $deposit->amount
+                    ]);
     
                     $user->increment('balance', (float) $deposit->amount);
-                    Log::info("After incrementing balance", ['user_id' => $user->id, 'new_balance' => $user->fresh()->balance]);
+                    Log::info("After incrementing balance", [
+                        'user_id' => $user->id,
+                        'new_balance' => $user->fresh()->balance
+                    ]);
     
                     $deposit->update(['status' => 'completed']);
     
                     try {
                         Log::info("Sending notification to user", ['user_id' => $user->id, 'amount' => $amount]);
     
-                        $notification = new DepositConfirmed($amount); // Define notification
-                        $user->notify($notification); // Send notification
+                        $notification = new DepositConfirmed($amount);
+                        $user->notify($notification);
     
-                        Log::info("Notification sent", ['notification_data' => $notification->toDatabase($user)]);              
+                        Log::info("Notification sent", ['notification_data' => $notification->toDatabase($user)]);
                     } catch (\Exception $e) {
                         Log::error("Failed to send deposit notification", [
                             'error' => $e->getMessage(),
@@ -137,9 +184,6 @@ class DepositController extends Controller
                     }
     
                     Log::info("Deposit successful", ['user_id' => $user->id, 'amount' => $amount]);
-    
-                    // Initiate Transfer to Third-Party Bank
-                    $this->transferToThirdParty($amount);
                 });
     
                 return response()->json(['message' => 'Deposit successful', 'amount' => $deposit->amount]);
@@ -177,33 +221,33 @@ class DepositController extends Controller
     
             return response()->json(['error' => 'Deposit verification failed'], 400);
         }
-    }
+    }    
     
-    // Transfer deposit to third-party account
-    private function transferToThirdParty($amount)
-    {
-        $recipientCode = $this->getOrCreateRecipient();
-        if (!$recipientCode) {
-            Log::error("Recipient code not found, transfer cannot be completed");
-            return;
-        }
+    // // Transfer deposit to third-party account
+    // private function transferToThirdParty($amount)
+    // {
+    //     $recipientCode = $this->getOrCreateRecipient();
+    //     if (!$recipientCode) {
+    //         Log::error("Recipient code not found, transfer cannot be completed");
+    //         return;
+    //     }
 
-        $response = Http::withHeaders([
-            'Authorization' => "Bearer " . env('PAYSTACK_SECRET_KEY'),
-            'Content-Type' => 'application/json',
-        ])->post('https://api.paystack.co/transfer', [
-            'source' => 'balance',
-            'amount' => $amount * 100,
-            'recipient' => $recipientCode,
-            'reason' => 'User Deposit Transfer',
-        ])->json();
+    //     $response = Http::withHeaders([
+    //         'Authorization' => "Bearer " . env('PAYSTACK_SECRET_KEY'),
+    //         'Content-Type' => 'application/json',
+    //     ])->post('https://api.paystack.co/transfer', [
+    //         'source' => 'balance',
+    //         'amount' => $amount * 100,
+    //         'recipient' => $recipientCode,
+    //         'reason' => 'User Deposit Transfer',
+    //     ])->json();
 
-        if (!$response['status']) {
-            Log::error("Failed to transfer funds", ['response' => $response]);
-        } else {
-            Log::info("Transfer successful", ['amount' => $amount, 'recipient_code' => $recipientCode]);
-        }
-    }
+    //     if (!$response['status']) {
+    //         Log::error("Failed to transfer funds", ['response' => $response]);
+    //     } else {
+    //         Log::info("Transfer successful", ['amount' => $amount, 'recipient_code' => $recipientCode]);
+    //     }
+    // }
 
     // Get or create transfer recipient
     private function getOrCreateRecipient()
