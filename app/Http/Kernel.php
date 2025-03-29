@@ -54,6 +54,7 @@ class Kernel extends HttpKernel
         // Custom JWT middleware for authentication
         'jwt.auth' => \App\Http\Middleware\JwtMiddleware::class, // Custom JWT Authentication middleware
         'jwt.refresh' => \Tymon\JWTAuth\Http\Middleware\RefreshToken::class,
+        'admin' => \App\Http\Middleware\AdminMiddleware::class,
 
         'auth' => \App\Http\Middleware\Authenticate::class, // Keep this if you still need it for other purposes
         'auth.basic' => \Illuminate\Auth\Middleware\AuthenticateWithBasicAuth::class,

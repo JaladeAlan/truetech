@@ -21,6 +21,12 @@ class Deposit extends Model
         'transaction_charge',
         'total_amount',
         'status',
+        'payment_method',
+        'payment_proof',
+        'approved_by',
+        'rejected_by',
+        'rejection_reason',
+        'approval_date'
     ];
 
     /**

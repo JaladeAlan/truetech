@@ -7,8 +7,12 @@ use App\Models\Deposit;
 use App\Models\PaystackRecipient; 
 use App\Notifications\DepositConfirmed;
 use App\Notifications\DepositFailedNotification;
+use App\Notifications\DepositApprovedNotification;
+use App\Notifications\DepositRejectedNotification;
+use App\Notifications\AdminDepositNotification;
 use Illuminate\Http\Request;
 use Tymon\JWTAuth\Facades\JWTAuth;
+use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
@@ -19,6 +23,42 @@ use Illuminate\Support\Facades\URL;
 
 class DepositController extends Controller
 {
+    private function getMonnifyToken()
+    {
+        $apiKey = env('MONNIFY_API_KEY');
+        $secretKey = env('MONNIFY_SECRET_KEY');
+        $base64Auth = base64_encode("$apiKey:$secretKey");
+
+        $response = Http::withHeaders([
+            'Authorization' => "Basic $base64Auth",
+        ])->post(env('MONNIFY_BASE_URL') . '/api/v1/auth/login');
+
+        if ($response->successful()) {
+            return $response->json()['responseBody']['accessToken'];
+        }
+
+        throw new \Exception('Failed to retrieve Monnify token');
+    }
+
+    public function getManualFundingDetails(Request $request)
+    {
+        $request->validate([
+            'amount' => 'required|numeric|min:100',
+        ]);
+
+        $userInputAmount = (float) $request->amount;
+        $transactionFee = 100;
+        $totalAmount = $userInputAmount + $transactionFee;
+
+        return response()->json([
+            'bank_name' => env('MANUAL_FUNDING_BANK_NAME', 'GTBank'),
+            'account_number' => env('MANUAL_FUNDING_ACCOUNT_NUMBER', '1234567890'),
+            'account_name' => env('MANUAL_FUNDING_ACCOUNT_NAME', 'Your Company Name'),
+            'instructions' => "Transfer exactly NGN $totalAmount (NGN $userInputAmount + NGN $transactionFee transaction fee) and upload proof of payment for approval.",
+        ]);
+    }
+
+
     // Initialize deposit
     public function initiateDeposit(Request $request)
     {
@@ -35,94 +75,171 @@ class DepositController extends Controller
             return response()->json(['error' => 'Token is absent'], 401);
         }
 
-        $request->validate([
-            'amount' => 'required|numeric|min:100',
-        ]);
-    
+        try {
+            $request->validate([
+                'amount' => 'required|numeric|min:100',
+                'payment_method' => 'required|in:monnify,manual,paystack',
+                'payment_proof' => 'required_if:payment_method,manual|file|mimes:jpg,jpeg,png,pdf|max:2048',
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $e->errors(),
+            ], 422);
+        }      
         $userInputAmount = (float) $request->amount;
-        $transactionChargePercent = 2.2 / 100; // 2.2% transaction fee
-    
-        // Calculate the total amount user needs to pay
+        $transactionChargePercent = env('TRANSACTION_CHARGE_PERCENT', 2.2) / 100;
+        $reference = 'DEPOSIT-' . uniqid();
+
+        if ($request->payment_method === 'manual') {
+            $transactionFee = 100;
+            $totalAmount = $userInputAmount + $transactionFee;
+            return $this->processManualDeposit($user, $request, $reference, $userInputAmount, $transactionFee, $totalAmount);
+        }
+
         $totalAmount = round($userInputAmount / (1 - $transactionChargePercent), 2);
         $transactionFee = round($totalAmount - $userInputAmount, 2);
-        
-        $reference = 'DEPOSIT-' . uniqid();
-    
-        $monnifyUrl = 'https://api.monnify.com/api/v1/transactions/init-transaction';
-        
-        $response = Http::withHeaders([
-            'Authorization' => 'Bearer ' . $this->getMonnifyToken(),
-            'Content-Type' => 'application/json',
-        ])->post($monnifyUrl, [
-            'amount' => $totalAmount,
-            'customerEmail' => $user->email,
-            'paymentReference' => $reference,
-            'paymentDescription' => "Deposit for {$user->name}",
-            'currencyCode' => 'NGN',
-            'contractCode' => env('MONNIFY_CONTRACT_CODE'),
-            'redirectUrl' => route('deposit.callback', ['reference' => $reference]),
-            'paymentMethods' => ['CARD', 'ACCOUNT_TRANSFER'],
-            'incomeSplitConfig' => [
-                [
-                    'subAccountCode' => env('MONNIFY_SUBACCOUNT_CODE'),
-                    'feeBearer' => false,
-                    'splitAmount' => $userInputAmount,
-                ],
-                [
-                    'subAccountCode' => env('MONNIFY_PLATFORM_ACCOUNT'),
-                    'feeBearer' => true,
-                    'splitAmount' => $transactionFee,
-                ]
-            ]
+     
+        if ($request->payment_method === 'paystack') {
+            return $this->processPaystackDeposit($user, $reference, $userInputAmount, $transactionFee, $totalAmount);
+        }
+
+        if ($request->payment_method === 'monnify') {
+            return $this->processMonnifyDeposit($user, $reference, $userInputAmount, $transactionFee, $totalAmount);
+        }
+
+        return response()->json(['error' => 'Invalid payment method'], 400);
+    }
+
+    private function createDeposit($user, $reference, $userInputAmount, $transactionFee, $totalAmount, $status, $paymentMethod, $proofPath = null)
+    {
+        Log::info("createDeposit Parameters", [
+            'user_id' => $user->id,
+            'reference' => $reference,
+            'amount' => $userInputAmount,
+            'transaction_fee' => $transactionFee,
+            'total_amount' => $totalAmount,
+            'status' => $status,
+            'payment_method' => $paymentMethod
         ]);
 
-        Log::info('Monnify Response', ['response' => $response->json()]);
-    
+        return Deposit::create([
+            'user_id' => $user->id,
+            'reference' => $reference,
+            'amount' => $userInputAmount,
+            'transaction_charge' => $transactionFee,
+            'total_amount' => $totalAmount,
+            'status' => $status,
+            'payment_method' => $paymentMethod,
+            'payment_proof' => $proofPath,
+        ]);
+    }
+
+    private function processManualDeposit($user, $request, $reference, $userInputAmount, $transactionFee, $totalAmount)
+    {
+        $proofPath = $request->file('payment_proof')?->store('deposits');
+
+        $deposit = $this->createDeposit($user, $reference, $userInputAmount, $transactionFee, $totalAmount, 'completed', 'manual', $proofPath);
+
+        $admin = User::where('is_admin', true)->get();
+        if ($admin->isEmpty()) {
+            return response()->json(['error' => 'No admin available to notify'], 400);
+        }
+        Notification::send($admin, new AdminDepositNotification($deposit));
+
+        return response()->json([
+            'reference' => $reference,
+            'amount' => $userInputAmount,
+            'transaction_charge' => $transactionFee,
+            'total_amount' => $totalAmount,
+            'bank_name' => env('MANUAL_FUNDING_BANK_NAME', 'GTBank'),
+            'account_number' => env('MANUAL_FUNDING_ACCOUNT_NUMBER', '1234567890'),
+            'account_name' => env('MANUAL_FUNDING_ACCOUNT_NAME', 'Your Company Name'),
+            'instructions' => 'Kindly wait for approval of account funding by admin. Contact support if it exceeds 2 hours.',
+        ]);
+    }
+
+    private function processPaystackDeposit($user, $reference, $userInputAmount, $transactionFee, $totalAmount)
+    {
+        // Convert amount to kobo
+        $amountInKobo = (int)($totalAmount * 100);
+
+        // Call Paystack API
+        $response = Http::withHeaders([
+            'Authorization' => 'Bearer ' . env('PAYSTACK_SECRET_KEY'),
+        ])->post('https://api.paystack.co/transaction/initialize', [
+            'email' => $user->email,
+            'amount' => $amountInKobo,
+            'reference' => $reference,
+            'callback_url' => URL::temporarySignedRoute('deposit.callback', now()->addMinutes(10), ['reference' => $reference]),
+        ]);
+
         if ($response->successful()) {
-            Log::info("Deposit initiated successfully", [
+            $deposit = $this->createDeposit($user, $reference, $userInputAmount, $transactionFee, $totalAmount, 'pending', 'paystack');
+
+            Log::info("Paystack Deposit Initiated", [
                 'reference' => $reference,
-                'user_id' => $user->id,
-                'amount' => $userInputAmount,
-                'transaction_charge' => $transactionFee,
-                'total_amount_paid' => $totalAmount
-            ]); 
-    
-            $data = $response->json()['responseBody'];
-            
-            Deposit::create([
-                'user_id' => $user->id,
+                'payment_method' => $deposit->payment_method
+            ]);
+
+            return response()->json([
+                'authorization_url' => $response->json()['data']['authorization_url'],
                 'reference' => $reference,
-                'amount' => $userInputAmount,
-                'transaction_charge' => $transactionFee,
-                'total_amount' => $totalAmount,
                 'status' => 'pending'
             ]);
-    
-            return response()->json([
-                'payment_url' => $data['checkoutUrl'],
-                'reference' => $reference,
-                'amount' => $userInputAmount,
-                'transaction_charge' => $transactionFee,
-                'total_amount' => $totalAmount,
-            ]);
-            Log::info('Deposit Created', [
-                'user_id' => $user->id, 'reference' => $reference, 'amount' => $userInputAmount
-            ]);
-        } else {
-            Log::error('Failed to initiate deposit', ['response' => $response->json(), 'user_id' => $user->id]);
-            return response()->json(['error' => 'Failed to initiate deposit'], 500);
         }
+
+        Log::error("Paystack Initialization Failed", ['response' => $response->json()]);
+        return response()->json(['error' => 'Failed to initialize payment with Paystack'], 500);
     }
+    
+    private function processMonnifyDeposit($user, $reference, $userInputAmount, $transactionFee, $totalAmount)
+    {
+        $deposit = $this->createDeposit($user, $reference, $userInputAmount, $transactionFee, $totalAmount, 'pending', 'monnify');
+    
+        return response()->json([
+            'authorization_url' => env('MONNIFY_API_URL', 'https://api.monnify.com/api/v1/transactions/init-transaction'),
+            'reference' => $reference,
+            'status' => 'pending'
+        ]);
+    } 
     
     // Handle deposit callback
     public function handleDepositCallback(Request $request)
     {
-        Log::info("Deposit callback accessed", ['method' => $request->method()]);
+        Log::info("Deposit callback accessed", [
+            'method' => $request->method(),
+            'request_data' => $request->all()
+        ]);
     
-        $reference = $request->query('paymentReference');
+        // Retrieve the reference from query parameters or request payload
+        $reference = $request->query('reference') ?? $request->input('reference');
+    
+        if (!$reference) {
+            return response()->json(['error' => 'Reference not provided'], 400);
+        }
+    
+        $deposit = Deposit::where('reference', $reference)->first();
+        if (!$deposit) {
+            return response()->json(['error' => 'Deposit record not found'], 404);
+        }
+    
+        $paymentMethod = $deposit->payment_method;
+    
+        if ($paymentMethod === 'monnify') {
+            return $this->handleMonnifyDeposit($reference, $deposit);
+        } elseif ($paymentMethod === 'paystack') {
+            return $this->handlePaystackDeposit($reference, $deposit);
+        }    
+        return response()->json(['error' => 'Unsupported payment method'], 400);
+    }
+    
+    
+    private function handleMonnifyDeposit($reference, $deposit)
+    {
         $monnifyUrl = 'https://api.monnify.com/api/v1/transactions/' . $reference;
     
-        // Authenticate with Monnify to get bearer token
         $authResponse = Http::withBasicAuth(env('MONNIFY_API_KEY'), env('MONNIFY_SECRET_KEY'))
             ->post('https://api.monnify.com/api/v1/auth/login')
             ->json();
@@ -133,95 +250,65 @@ class DepositController extends Controller
         }
     
         $accessToken = $authResponse['responseBody']['accessToken'];
-    
-        // Verify transaction status
-        $response = Http::withHeaders([
-            'Authorization' => 'Bearer ' . $accessToken,
-        ])->get($monnifyUrl);
-    
-        Log::info("Monnify response for deposit verification", ['response' => $response->json(), 'reference' => $reference]);
+        $response = Http::withHeaders(['Authorization' => 'Bearer ' . $accessToken])
+            ->get($monnifyUrl);
     
         if ($response->successful() && $response['responseBody']['paymentStatus'] === 'PAID') {
-            $amount = $response['responseBody']['amountPaid'];
-            $userEmail = $response['responseBody']['customer']['email'];
+            return $this->finalizeDeposit($deposit);
+        }
     
-            $user = User::where('email', $userEmail)->first();
-            if (!$user) return response()->json(['error' => 'User not found'], 404);
+        $deposit->update(['status' => 'failed']);
+        return response()->json(['error' => 'Deposit verification failed'], 400);
+    }
     
-            $deposit = Deposit::where('reference', $reference)->first();
-            if (!$deposit) return response()->json(['error' => 'Deposit record not found'], 404);
+    private function handlePaystackDeposit($reference, $deposit)
+    {
+        $paystackSecretKey = env('PAYSTACK_SECRET_KEY');
+        
+        if (!$paystackSecretKey) {
+            Log::error("Paystack Secret Key not set");
+            return response()->json(['error' => 'Payment verification unavailable'], 500);
+        }
     
-            try {
-                DB::transaction(function () use ($user, $amount, $deposit) {
-                    Log::info("Before incrementing balance", [
-                        'user_id' => $user->id,
-                        'current_balance' => $user->balance,
-                        'deposit_amount' => $deposit->amount
-                    ]);
+        $response = Http::withHeaders([
+            'Authorization' => 'Bearer ' . $paystackSecretKey,
+        ])->get('https://api.paystack.co/transaction/verify/' . $reference);
     
-                    $user->increment('balance', (float) $deposit->amount);
-                    Log::info("After incrementing balance", [
-                        'user_id' => $user->id,
-                        'new_balance' => $user->fresh()->balance
-                    ]);
+        if ($response->failed()) {
+            Log::error("Paystack verification failed", ['response' => $response->json()]);
+            $deposit->update(['status' => 'failed']);
+            return response()->json(['error' => 'Verification request failed'], 500);
+        }
     
-                    $deposit->update(['status' => 'completed']);
+        $responseData = $response->json();
     
-                    try {
-                        Log::info("Sending notification to user", ['user_id' => $user->id, 'amount' => $amount]);
-    
-                        $notification = new DepositConfirmed($amount);
-                        $user->notify($notification);
-    
-                        Log::info("Notification sent", ['notification_data' => $notification->toDatabase($user)]);
-                    } catch (\Exception $e) {
-                        Log::error("Failed to send deposit notification", [
-                            'error' => $e->getMessage(),
-                            'user_id' => $user->id,
-                            'amount' => $amount,
-                            'deposit_reference' => $deposit->reference,
-                        ]);
-                    }
-    
-                    Log::info("Deposit successful", ['user_id' => $user->id, 'amount' => $amount]);
-                });
-    
-                return response()->json(['message' => 'Deposit successful', 'amount' => $deposit->amount]);
-            } catch (\Exception $e) {
-                Log::error("Database error on deposit", ['error' => $e->getMessage(), 'user_id' => $user->id]);
-                return response()->json(['error' => 'Failed to update deposit'], 500);
-            }
-        } else {
-            Log::error("Deposit verification failed", ['reference' => $reference, 'response' => $response->json()]);
-    
-            $deposit = Deposit::where('reference', $reference)->first();
-            if ($deposit) {
-                $deposit->update(['status' => 'failed']);
-            }
-    
-            if ($deposit && $deposit->user_id) {
-                $user = User::find($deposit->user_id);
-                if ($user) {
-                    try {
-                        Log::info("Sending deposit failed notification", ['user_id' => $user->id, 'deposit_reference' => $deposit->reference]);
-    
-                        $failedNotification = new DepositFailedNotification($deposit);
-                        $user->notify($failedNotification);
-    
-                        Log::info("Deposit failed notification sent", ['notification_data' => $failedNotification->toDatabase($user)]);
-                    } catch (\Exception $e) {
-                        Log::error("Failed to send deposit failed notification", [
-                            'error' => $e->getMessage(),
-                            'user_id' => $user->id,
-                            'deposit_reference' => $deposit->reference,
-                        ]);
-                    }
-                }
-            }
-    
+        // Validate response structure
+        if (!isset($responseData['data']) || $responseData['data']['status'] !== 'success') {
+            Log::error("Paystack deposit verification failed", ['response' => $responseData]);
+            $deposit->update(['status' => 'failed']);
             return response()->json(['error' => 'Deposit verification failed'], 400);
         }
-    }    
+    
+        return $this->finalizeDeposit($deposit);
+    }  
+    
+    private function finalizeDeposit($deposit)
+    {
+        $user = $deposit->user;
+        if (!$user) return response()->json(['error' => 'User not found'], 404);
+    
+        try {
+            DB::transaction(function () use ($user, $deposit) {
+                $user->increment('balance', (float)$deposit->amount);
+                $deposit->update(['status' => 'completed']);
+                $user->notify(new DepositConfirmed($deposit->amount));
+            });
+            return response()->json(['message' => 'Deposit successful', 'amount' => $deposit->amount]);
+        } catch (\Exception $e) {
+            Log::error("Database error on deposit", ['error' => $e->getMessage()]);
+            return response()->json(['error' => 'Failed to update deposit'], 500);
+        }
+    }   
     
     // // Transfer deposit to third-party account
     // private function transferToThirdParty($amount)
@@ -275,6 +362,94 @@ class DepositController extends Controller
             return $recipientCode;
         }
 
-        return null;
+        return null;    
     }
+
+    public function getPendingManualDeposits()
+    {
+        $pendingDeposits = Deposit::where('status', 'completed')
+            ->where('payment_method', 'manual')
+            ->get();
+
+        return response()->json([
+            'status' => 'success',
+            'data' => $pendingDeposits
+        ]);
+    }
+
+    public function approveManualDeposit(Request $request)
+    {
+        $request->validate([
+            'reference' => 'required|string|exists:deposits,reference',
+        ]);
+
+        $deposit = Deposit::where('reference', $request->reference)
+            ->where('payment_method', 'manual')
+            ->first();
+
+        if (!$deposit) {
+            return response()->json(['error' => 'Deposit not found or not a manual funding request'], 404);
+        }
+
+        if ($deposit->status !== 'completed') {
+            return response()->json(['error' => 'Deposit is not awaiting approval'], 400);
+        }
+
+        DB::transaction(function () use ($deposit) {
+            $user = User::find($deposit->user_id);
+
+            if (!$user) {
+                throw new \Exception('User not found');
+            }
+
+            // Credit the user
+            $user->increment('balance', $deposit->amount);
+
+            // Mark the deposit as approved
+            $deposit->update([
+                'status' => 'approved',
+                'approval_date' => now(),
+                'approved_by' => auth()->id(),
+            ]);
+
+            $user->notify(new DepositApprovedNotification($deposit->amount));
+        });
+
+        return response()->json(['message' => 'Deposit approved successfully']);
+    }
+    public function rejectManualDeposit(Request $request)
+    {
+        $request->validate([
+            'reference' => 'required|string|exists:deposits,reference',
+            'reason' => 'required|string|min:5',
+        ]);
+
+        $deposit = Deposit::where('reference', $request->reference)
+            ->where('payment_method', 'manual')
+            ->first();
+
+        if (!$deposit) {
+            return response()->json(['error' => 'Deposit not found or not a manual funding request'], 404);
+        }
+
+        if ($deposit->status !== 'completed') {
+            return response()->json(['error' => 'Deposit is not awaiting approval'], 400);
+        }
+
+        DB::transaction(function () use ($deposit, $request) {
+            $user = $deposit->user;
+
+            $deposit->update([
+                'status' => 'rejected',
+                'rejection_reason' => $request->reason,
+                'rejected_by' => auth()->id(),
+            ]);
+
+            $user->notify(new DepositRejectedNotification($deposit->amount, $deposit->rejection_reason));
+        });
+
+        return response()->json(['message' => 'Deposit rejected successfully']);
+    }
+
+
 }

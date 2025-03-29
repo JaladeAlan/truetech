@@ -49,6 +49,7 @@
         Route::put('/user/bankdetails', [UserController::class, 'updateBankDetails']);
 
         // Deposits & Withdrawals
+        Route::get('/manual', [DepositController::class, 'getManualFundingDetails']);
         Route::post('/deposit', [DepositController::class, 'initiateDeposit']);
         Route::post('/withdraw', [WithdrawalController::class, 'initiateWithdrawal']);
         Route::post('/withdrawal/request', [WithdrawalController::class, 'requestWithdrawal']);
@@ -115,7 +116,14 @@
         Route::get('/validatesmartcard', [MaskawasubController::class, 'validateSmartCard']);
         Route::get('/validatemeter', [MaskawasubController::class, 'validateMeterNumber']);
     });
-   
+
+    Route::middleware(['jwt.auth', \App\Http\Middleware\AdminMiddleware::class])->group(function () {
+        Route::post('/admin/manual', [DepositController::class, 'manualDeposit']);
+        Route::get('/admin/deposits', [DepositController::class, 'getPendingManualDeposits']);
+        Route::post('/admin/deposits/approve', [DepositController::class, 'approveManualDeposit']);
+        Route::post('/admin/deposits/reject', [DepositController::class, 'rejectManualDeposit']);
+    });
+    
     });
 
     
