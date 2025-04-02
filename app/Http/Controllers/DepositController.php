@@ -184,7 +184,7 @@ class DepositController extends Controller
             ]);
 
             return response()->json([
-                'authorization_url' => $response->json()['data']['authorization_url'],
+                'checkout_url' => $response->json()['data']['authorization_url'],
                 'reference' => $reference,
                 'status' => 'pending'
             ]);
@@ -193,17 +193,62 @@ class DepositController extends Controller
         Log::error("Paystack Initialization Failed", ['response' => $response->json()]);
         return response()->json(['error' => 'Failed to initialize payment with Paystack'], 500);
     }
-    
+
     private function processMonnifyDeposit($user, $reference, $userInputAmount, $transactionFee, $totalAmount)
     {
-        $deposit = $this->createDeposit($user, $reference, $userInputAmount, $transactionFee, $totalAmount, 'pending', 'monnify');
+        // Monnify Authentication
+        $authResponse = Http::withBasicAuth(env('MONNIFY_API_KEY'), env('MONNIFY_SECRET_KEY'))
+            ->post(env('MONNIFY_API_URL', 'https://sandbox.monnify.com/api/v1/auth/login'))
+            ->json();
     
-        return response()->json([
-            'authorization_url' => env('MONNIFY_API_URL', 'https://api.monnify.com/api/v1/transactions/init-transaction'),
-            'reference' => $reference,
-            'status' => 'pending'
+        if (!is_array($authResponse) || !isset($authResponse['requestSuccessful']) || !$authResponse['requestSuccessful']) {
+            Log::error("Monnify Authentication Failed", ['response' => $authResponse]);
+            return response()->json(['error' => 'Failed to authenticates with Monnify'], 500);
+        }
+    
+        $accessToken = $authResponse['responseBody']['accessToken'];
+        Log::info("Monnify Access Token", ['accessToken' => $accessToken]);
+
+        // Payment Initialization
+        $response = Http::withHeaders([
+            'Authorization' => 'Bearer ' . $accessToken,
+            'Content-Type' => 'application/json',
+        ])->post(env('MONNIFY_API_URL', 'https://sandbox.monnify.com/api/v1/merchant/transactions/init-transaction'), [
+            'amount' => (int)$totalAmount,
+            'customerName' => $user->name,
+            'customerEmail' => $user->email,
+            'paymentReference' => $reference,
+            'paymentDescription' => 'Account Deposit',
+            'currencyCode' => 'NGN',
+            'redirectUrl' => 'https://ce36-2c0f-2a80-a78-1f10-4552-6b2f-a831-9bbf.ngrok-free.app/api/deposit/callback?reference=' . $reference,
+            'paymentMethods' => ['CARD', 'ACCOUNT_TRANSFER'],
         ]);
-    } 
+        
+        Log::info("Monnify Deposit Initiated", [
+            'amount' => $totalAmount,
+            'customerName' => $user->name,
+            'customerEmail' => $user->email,
+            'paymentReference' => $reference,
+            'paymentDescription' => 'Account Deposit',
+            'currencyCode' => 'NGN',
+            'redirectUrl' => 'https://ce36-2c0f-2a80-a78-1f10-4552-6b2f-a831-9bbf.ngrok-free.app/api/deposit/callback?reference=' . $reference,]);
+
+        // Log Payment Initialization Response
+        Log::info("Monnify Payment Initialization Response", ['response' => $response->json()]);
+    
+        if ($response->successful() && $response->json()['requestSuccessful']) {
+            $deposit = $this->createDeposit($user, $reference, $userInputAmount, $transactionFee, $totalAmount, 'pending', 'monnify');
+    
+            return response()->json([
+                'checkout_url' => $response->json()['responseBody']['checkoutUrl'],
+                'reference' => $reference,
+                'status' => 'pending'
+            ]);
+        }
+    
+        Log::error("Monnify Payment Initialization Failed", ['response' => $response->json()]);
+        return response()->json(['error' => 'Failed to initialize payment with Monnify'], 500);
+    }    
     
     // Handle deposit callback
     public function handleDepositCallback(Request $request)
