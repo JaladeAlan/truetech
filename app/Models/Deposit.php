@@ -19,6 +19,7 @@ class Deposit extends Model
         'reference',
         'amount',
         'transaction_charge',
+        'transaction_reference',
         'total_amount',
         'status',
         'payment_method',
