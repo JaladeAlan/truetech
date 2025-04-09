@@ -10,7 +10,6 @@
     use App\Http\Controllers\WebhookController;
     use App\Http\Controllers\NotificationController; 
     use App\Http\Controllers\MaskawasubController; 
-    use App\Http\Controllers\MonnifyController; 
 
     // Public routes
     Route::post('/register', [AuthController::class, 'register']);
@@ -30,15 +29,12 @@
     // Deposit callback
     Route::get('/deposit/callback', [DepositController::class, 'handleDepositCallback'])->name('deposit.callback');
    
-    // Monnify deposit initialization
-    Route::post('/deposit/monnify/initiate', [MonnifyController::class, 'processMonnifyDeposit']);
+    // Monnify deposit callback
     Route::post('/monnify/deposit/callback', [DepositController::class, 'handleMonnifyCallback']);
-    Route::get('/monnify/deposit/verify', [MonnifyController::class, 'verifyDeposit']); 
 
     // Webhooks (No Authentication)
     Route::post('/paystack/webhook', [WithdrawalController::class, 'handlePaystackCallback']);
     Route::post('/autopilot/webhook', [WebhookController::class, 'handleWebhook']);
-    Route::post('/monnify/webhook', [MonnifyController::class, 'webhook']);
 
     Route::get('/validatesmartcards', [MaskawasubController::class, 'validateSmartCard']);
 

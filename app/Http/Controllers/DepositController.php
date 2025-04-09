@@ -151,7 +151,7 @@ class DepositController extends Controller
         $amountInKobo = (int)($totalAmount * 100);
 
         $response = Http::withHeaders([
-            'Authorization' => 'Bearer ' . env('PAYSTACK_SECRET_KEY'),
+            'Authorization' => 'Bearer ' . config('services.paystack.secret_key'),
         ])->post('https://api.paystack.co/transaction/initialize', [
             'email' => $user->email,
             'amount' => $amountInKobo,
@@ -209,7 +209,7 @@ class DepositController extends Controller
            
     private function handlePaystackDeposit($reference, $deposit)
     {
-        $paystackSecretKey = env('PAYSTACK_SECRET_KEY');
+        $paystackSecretKey = config('services.paystack.secret_key');
         
         if (!$paystackSecretKey) {
             Log::error("Paystack Secret Key not set");
