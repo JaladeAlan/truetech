@@ -13,20 +13,29 @@ use Illuminate\Support\Facades\Validator;
 
 class UserController extends Controller
 {
+    protected $user;
+
+    public function __construct()
+    {
+        // Automatically authenticate user via JWT
+        $this->middleware(function ($request, $next) {
+            $this->user = JWTAuth::parseToken()->authenticate();
+            return $next($request);
+        });
+    }
+
     /**
      * Update user's bank details using Paystack API
      */
     public function updateBankDetails(Request $request)
     {
-        $user = JWTAuth::parseToken()->authenticate();
-
         $request->validate([
             'account_number' => 'required|numeric|digits_between:10,12',
             'bank_name' => 'required|string',
         ]);
 
         try {
-            // Fetch bank codes from Paystack (cached for efficiency)
+            // Fetch bank codes (cached)
             $banks = Cache::remember('paystack_banks', now()->addHours(12), function () {
                 $response = Http::withToken(config('services.paystack.secret_key'))
                     ->get('https://api.paystack.co/bank');
@@ -42,7 +51,7 @@ class UserController extends Controller
 
             $bankCode = $bank['code'];
 
-            // Resolve account number with Paystack
+            // Resolve account number
             $resolveResponse = Http::withToken(config('services.paystack.secret_key'))
                 ->get('https://api.paystack.co/bank/resolve', [
                     'account_number' => $request->account_number,
@@ -57,22 +66,23 @@ class UserController extends Controller
             }
 
             $resolvedData = $resolveResponse->json();
-            if (!isset($resolvedData['data']['account_name'])) {
+            $accountName = $resolvedData['data']['account_name'] ?? null;
+
+            if (!$accountName) {
                 return response()->json(['error' => 'Invalid account details returned'], 400);
             }
 
-            $accountName = $resolvedData['data']['account_name'];
-
+            // Mask account number for logging
             Log::info('Updating bank details:', [
-                'user_id' => $user->id,
-                'account_number' => $request->account_number,
+                'user_id' => $this->user->id,
+                'account_number' => '****' . substr($request->account_number, -4),
                 'bank_code' => $bankCode,
                 'bank_name' => $request->bank_name,
                 'account_name' => $accountName,
             ]);
 
-            // Update the user's bank details
-            $user->update([
+            // Update user bank details
+            $this->user->update([
                 'account_number' => $request->account_number,
                 'bank_code' => $bankCode,
                 'bank_name' => $request->bank_name,
@@ -82,7 +92,6 @@ class UserController extends Controller
             return response()->json(['message' => 'Bank details updated successfully'], 200);
         } catch (\Exception $e) {
             Log::error('Error updating bank details: ' . $e->getMessage());
-
             return response()->json([
                 'error' => 'An error occurred while updating bank details',
                 'message' => $e->getMessage(),
@@ -95,79 +104,83 @@ class UserController extends Controller
      */
     public function getProfile()
     {
-        $user = JWTAuth::parseToken()->authenticate();
-
         return response()->json([
-            'name' => $user->name,
-            'username' =>$user->username,
-            'phoneno'=>$user->phone_number,
-            'email' => $user->email,
-            'balance' => $user->balance,
-            'referral_code' => $user->referral_code,
-            'referral_count' => $user->referrals()->count(),
+            'name' => $this->user->name,
+            'username' => $this->user->username,
+            'phoneno' => $this->user->phone_number,
+            'email' => $this->user->email,
+            'balance' => $this->user->balance,
+            'referral_code' => $this->user->referral_code,
+            'referral_count' => $this->user->referrals()->count(),
         ]);
     }
 
     /**
-     * Get referral statistics for the user
+     * Get referral statistics with optional pagination
      */
-    public function getReferralStats()
+    public function getReferralStats(Request $request)
     {
-        $user = JWTAuth::parseToken()->authenticate();
+        $perPage = $request->query('per_page', 10);
 
-        $referrals = $user->referrals()->select('name', 'email', 'created_at')->get();
+        $referrals = $this->user->referrals()
+            ->select('name', 'email', 'created_at')
+            ->paginate($perPage);
 
         return response()->json([
-            'referral_count' => $referrals->count(),
-            'referrals' => $referrals,
+            'referral_count' => $referrals->total(),
+            'referrals' => $referrals->items(),
+            'current_page' => $referrals->currentPage(),
+            'last_page' => $referrals->lastPage(),
         ]);
     }
+
+    /**
+     * Set transaction PIN (hashed)
+     */
     public function setTransactionPin(Request $request)
     {
-        $user = JWTAuth::parseToken()->authenticate();
-    
         $validator = Validator::make($request->all(), [
             'password' => 'required|string',
             'pin' => 'required|digits:4',
             'confirm_pin' => 'required|digits:4|same:pin',
         ]);
-    
+
         if ($validator->fails()) {
             return response()->json(['errors' => $validator->errors()], 422);
         }
-    
-        if (!Hash::check($request->password, $user->password)) {
+
+        if (!Hash::check($request->password, $this->user->password)) {
             return response()->json(['error' => 'Incorrect account password'], 400);
         }
-    
-        $user->transaction_pin = $request->pin;
-        $user->save();
-    
+
+        $this->user->transaction_pin = Hash::make($request->pin);
+        $this->user->save();
+
         return response()->json(['message' => 'Transaction PIN set successfully'], 200);
     }
-    
+
+    /**
+     * Update transaction PIN
+     */
     public function updateTransactionPin(Request $request)
     {
-        $user = JWTAuth::parseToken()->authenticate();
-    
         $validator = Validator::make($request->all(), [
             'current_pin' => 'required|digits:4',
             'new_pin' => 'required|digits:4',
             'confirm_new_pin' => 'required|digits:4|same:new_pin',
         ]);
-    
+
         if ($validator->fails()) {
             return response()->json(['errors' => $validator->errors()], 422);
         }
-    
-        if (!$user->verifyTransactionPin($request->current_pin)) {
+
+        if (!Hash::check($request->current_pin, $this->user->transaction_pin)) {
             return response()->json(['error' => 'Incorrect current PIN'], 400);
         }
-    
-        $user->transaction_pin = $request->new_pin;
-        $user->save();
-    
+
+        $this->user->transaction_pin = Hash::make($request->new_pin);
+        $this->user->save();
+
         return response()->json(['message' => 'Transaction PIN updated successfully'], 200);
     }
-    
 }

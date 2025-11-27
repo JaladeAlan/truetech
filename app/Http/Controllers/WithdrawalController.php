@@ -22,7 +22,14 @@ class WithdrawalController extends Controller
 
         $request->validate([
             'amount' => 'required|numeric|min:1',
+            // Uncomment if you want to require transaction PIN
+            // 'transaction_pin' => 'required|digits:4',
         ]);
+
+        // Optional transaction PIN verification
+        // if (!$user->verifyTransactionPin($request->transaction_pin)) {
+        //     return response()->json(['error' => 'Invalid transaction PIN'], 400);
+        // }
 
         if ($user->balance < $request->amount) {
             return response()->json(['error' => 'Insufficient balance'], 400);
@@ -32,14 +39,9 @@ class WithdrawalController extends Controller
             return response()->json(['error' => 'Bank details are missing'], 400);
         }
 
-        // if (Withdrawal::where('user_id', $user->id)->where('status', 'pending')->exists()) {
-        //     return response()->json(['error' => 'You already have a pending withdrawal'], 400);
-        // }
-
         try {
-            $referenceCode = 'WD-' . now()->format('Ymd-His') . '-' . Str::random(6);
+            $referenceCode = $this->generateReference();
 
-            // Log balance before withdrawal
             Log::info('User balance before withdrawal', [
                 'user_id' => $user->id,
                 'balance' => $user->balance,
@@ -57,25 +59,22 @@ class WithdrawalController extends Controller
                 ]);
             });
 
-              // Log balance after withdrawal
             Log::info('User balance after withdrawal', [
                 'user_id' => $user->id,
-                'balance' => $user->fresh()->balance, 
-            ]);
-
-            Log::info('Withdrawal initiated', [
-                'user_id' => $user->id,
-                'account_number' => $user->account_number,
-                'bank_code' => $user->bank_code,
+                'balance' => $user->fresh()->balance,
             ]);
 
             if (config('services.paystack.test_mode')) {
                 return $this->simulateTestWithdrawal($referenceCode);
-            } else {
-                $this->initiatePaystackTransfer($user, $request->amount, $referenceCode);
             }
 
-            return response()->json(['message' => 'Withdrawal request initiated', 'reference' => $referenceCode], 200);
+            $this->initiatePaystackTransfer($user, $request->amount, $referenceCode);
+
+            return response()->json([
+                'message' => 'Withdrawal request initiated',
+                'reference' => $referenceCode
+            ], 200);
+
         } catch (\Exception $e) {
             Log::error('Withdrawal request failed', [
                 'error' => $e->getMessage(),
@@ -86,6 +85,15 @@ class WithdrawalController extends Controller
         }
     }
 
+    // Generate unique withdrawal reference
+    protected function generateReference()
+    {
+        $dateTime = now()->format('Ymd-His');
+        $randomString = Str::upper(Str::random(6));
+        return 'WD-' . $dateTime . '-' . $randomString;
+    }
+
+    // Test mode withdrawal simulation
     protected function simulateTestWithdrawal($referenceCode)
     {
         Log::info('Simulating test mode withdrawal', ['reference' => $referenceCode]);
@@ -104,6 +112,7 @@ class WithdrawalController extends Controller
         ], 200);
     }
 
+    // Initiate Paystack transfer
     protected function initiatePaystackTransfer($user, $amount, $referenceCode)
     {
         Log::info('Initiating transfer with Paystack', [
@@ -128,11 +137,13 @@ class WithdrawalController extends Controller
         }
     }
 
+    // Get existing recipient code or create one
     protected function getOrCreatePaystackRecipient($user)
     {
         return $user->recipient_code ?? $this->createPaystackRecipient($user);
     }
 
+    // Create a new Paystack recipient
     protected function createPaystackRecipient($user)
     {
         $recipientResponse = Http::withToken(config('services.paystack.secret_key'))
@@ -154,7 +165,8 @@ class WithdrawalController extends Controller
         return $recipientCode;
     }
 
-   public function handlePaystackCallback(Request $request)
+    // Handle Paystack webhook callback
+    public function handlePaystackCallback(Request $request)
     {
         if (!config('services.paystack.test_mode')) {
             $payload = file_get_contents('php://input'); 
@@ -166,8 +178,9 @@ class WithdrawalController extends Controller
             }
         }
 
-        $reference = $request->input('data.reference');
-        $status = $request->input('data.status');
+        $data = $request->input('data', []);
+        $reference = $data['reference'] ?? null;
+        $status = $data['status'] ?? null;
 
         $withdrawal = Withdrawal::firstWhere('reference', $reference);
 
@@ -176,59 +189,15 @@ class WithdrawalController extends Controller
         }
 
         DB::transaction(function () use ($withdrawal, $status) {
-            if ($withdrawal->status === 'completed') {
-                return;
-            }
+            if ($withdrawal->status === 'completed') return;
 
             if ($status === 'success') {
                 $withdrawal->update(['status' => 'completed']);
-
-                try {
-                    Log::info("Sending withdrawal confirmation notification", [
-                        'user_id' => $withdrawal->user->id,
-                        'amount' => $withdrawal->amount,
-                        'withdrawal_reference' => $withdrawal->reference,
-                    ]);
-                
-                    $notification = new WithdrawalConfirmed($withdrawal);
-                    $withdrawal->user->notify($notification);
-                
-                    Log::info("Withdrawal confirmation notification sent", [
-                        'notification_data' => $notification->toDatabase($withdrawal->user),
-                    ]);
-                } catch (\Exception $e) {
-                    Log::error("Failed to send withdrawal confirmation notification", [
-                        'error' => $e->getMessage(),
-                        'user_id' => $withdrawal->user->id,
-                        'amount' => $withdrawal->amount,
-                        'withdrawal_reference' => $withdrawal->reference,
-                    ]);
-                }                
+                $this->sendWithdrawalNotification($withdrawal, true);
             } elseif ($status === 'failed') {
                 $withdrawal->user->increment('balance', $withdrawal->amount);
                 $withdrawal->update(['status' => 'failed']);
-
-                try {
-                    Log::info("Sending withdrawal failure notification", [
-                        'user_id' => $withdrawal->user->id,
-                        'amount' => $withdrawal->amount,
-                        'withdrawal_reference' => $withdrawal->reference,
-                    ]);
-                
-                    $notification = new WithdrawalFailedNotification($withdrawal);
-                    $withdrawal->user->notify($notification);
-                
-                    Log::info("Withdrawal failure notification sent", [
-                        'notification_data' => $notification->toDatabase($withdrawal->user),
-                    ]);
-                } catch (\Exception $e) {
-                    Log::error("Failed to send withdrawal failure notification", [
-                        'error' => $e->getMessage(),
-                        'user_id' => $withdrawal->user->id,
-                        'amount' => $withdrawal->amount,
-                        'withdrawal_reference' => $withdrawal->reference,
-                    ]);
-                }                
+                $this->sendWithdrawalNotification($withdrawal, false);
             } else {
                 Log::warning('Unexpected Paystack withdrawal status', ['status' => $status]);
             }
@@ -237,76 +206,64 @@ class WithdrawalController extends Controller
         return response()->json(['status' => 'Callback handled']);
     }
 
+    // Send withdrawal notifications
+    protected function sendWithdrawalNotification($withdrawal, $success = true)
+    {
+        try {
+            $notification = $success
+                ? new WithdrawalConfirmed($withdrawal)
+                : new WithdrawalFailedNotification($withdrawal);
+
+            $withdrawal->user->notify($notification);
+
+            Log::info('Withdrawal notification sent', [
+                'user_id' => $withdrawal->user->id,
+                'amount' => $withdrawal->amount,
+                'reference' => $withdrawal->reference,
+                'success' => $success
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Failed to send withdrawal notification', [
+                'error' => $e->getMessage(),
+                'user_id' => $withdrawal->user->id,
+                'reference' => $withdrawal->reference
+            ]);
+        }
+    }
+
+    // Get withdrawal status
     public function getWithdrawalStatus($reference)
     {
-        Log::info("Checking withdrawal status for reference: " . $reference);
-    
         $withdrawal = Withdrawal::firstWhere('reference', $reference);
-    
+
         if (!$withdrawal) {
-            Log::error("Withdrawals not found", ['reference' => $reference]);
-            return response()->json(['error' => 'Withdrawalsss not found'], 404);
+            return response()->json(['error' => 'Withdrawal not found'], 404);
         }
-    
+
         return response()->json([
             'status' => $withdrawal->status,
             'amount' => $withdrawal->amount,
             'requested_at' => $withdrawal->created_at,
             'completed_at' => $withdrawal->updated_at,
         ], 200);
-    }   
+    }
 
+    // Retry pending withdrawals
     public function retryPendingWithdrawals()
     {
         $pendingWithdrawals = Withdrawal::where('status', 'pending')->get();
-    
+
         if ($pendingWithdrawals->isEmpty()) {
-            Log::info('No pending withdrawals to retry');
             return response()->json(['message' => 'No pending withdrawals to retry'], 200);
         }
-    
-        Log::info('Pending withdrawals found', [
-            'withdrawals' => $pendingWithdrawals->map(function ($withdrawal) {
-                return [
-                    'id' => $withdrawal->id,
-                    'user_id' => $withdrawal->user_id,
-                    'amount' => $withdrawal->amount,
-                    'reference' => $withdrawal->reference,
-                    'status' => $withdrawal->status
-                ];
-            })
-        ]);
-    
+
         foreach ($pendingWithdrawals as $withdrawal) {
-            if (!$withdrawal->reference) {
-                Log::error('Skipping withdrawal due to missing reference', [
-                    'withdrawal_id' => $withdrawal->id
-                ]);
-                continue;
-            }
-    
-            // Ensure the withdrawal exists before proceeding
+            if (!$withdrawal->reference) continue;
             $existingWithdrawal = Withdrawal::where('reference', $withdrawal->reference)->first();
-            if (!$existingWithdrawal) {
-                Log::error("Withdrawal not found in database", [
-                    'reference' => $withdrawal->reference
-                ]);
-                continue;
-            }
-    
+            if (!$existingWithdrawal) continue;
+
             try {
-                Log::info('Retrying withdrawal', [
-                    'withdrawal_id' => $withdrawal->id,
-                    'user_id' => $withdrawal->user_id,
-                    'amount' => $withdrawal->amount,
-                    'reference' => $withdrawal->reference
-                ]);
-    
-                // Re-trigger the withdrawal attempt
                 $this->initiatePaystackTransfer($withdrawal->user, $withdrawal->amount, $withdrawal->reference);
-    
-                Log::info('Withdrawal retried successfully', ['reference' => $withdrawal->reference]);
-    
             } catch (\Exception $e) {
                 Log::error('Failed to retry withdrawal', [
                     'withdrawal_id' => $withdrawal->id,
@@ -315,8 +272,7 @@ class WithdrawalController extends Controller
                 ]);
             }
         }
-    
+
         return response()->json(['message' => 'Pending withdrawals retried'], 200);
-    }    
-      
+    }
 }

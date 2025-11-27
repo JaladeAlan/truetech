@@ -1,0 +1,777 @@
+openapi: 3.1.0
+info:
+  title: Telecom API
+  version: 1.0.0
+  description: Full API documentation for VTU platform
+
+servers:
+  - url: 
+    description: Production server
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        username:
+          type: string
+        email:
+          type: string
+        phone_number:
+          type: string
+        balance:
+          type: number
+          format: float
+        referral_code:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Withdrawal:
+      type: object
+      properties:
+        reference:
+          type: string
+        amount:
+          type: number
+          format: float
+        status:
+          type: string
+          enum: [pending, completed, failed]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Notification:
+      type: object
+      properties:
+        id:
+          type: integer
+        type:
+          type: string
+        data:
+          type: object
+        read_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    TransactionResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        message:
+          type: string
+        reference:
+          type: string
+        data:
+          type: object
+
+paths:
+
+  # ---------------- AUTH ----------------
+  /register:
+    post:
+      summary: Register a new user
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password]
+              properties:
+                name: { type: string }
+                email: { type: string }
+                password: { type: string }
+      responses:
+        "201":
+          description: User registered successfully
+
+  /login:
+    post:
+      summary: Login user
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Login successful
+
+  /email/verify/code:
+    post:
+      summary: Verify email with code
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        "200":
+          description: Email verified
+
+  /email/resend-verification:
+    post:
+      summary: Resend verification email
+      tags: [Auth]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Verification email resent
+
+  /password/reset/code:
+    post:
+      summary: Send password reset code
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string }
+      responses:
+        "200":
+          description: Reset code sent
+
+  /password/reset/verify:
+    post:
+      summary: Verify password reset code
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, code]
+              properties:
+                email: { type: string }
+                code: { type: string }
+      responses:
+        "200":
+          description: Reset code verified
+
+  /password/reset:
+    post:
+      summary: Reset password
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, confirm_password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+                confirm_password: { type: string }
+      responses:
+        "200":
+          description: Password reset successful
+
+  # ---------------- USER ----------------
+  /user/profile:
+    get:
+      summary: Get authenticated user profile
+      tags: [User]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: User profile retrieved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+
+  /user/bankdetails:
+    put:
+      summary: Update bank details
+      tags: [User]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [account_number, bank_name]
+              properties:
+                account_number: { type: string }
+                bank_name: { type: string }
+      responses:
+        "200":
+          description: Bank details updated
+
+  /pin/set:
+    post:
+      summary: Set transaction PIN
+      tags: [User]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, pin, confirm_pin]
+              properties:
+                password: { type: string }
+                pin: { type: string }
+                confirm_pin: { type: string }
+      responses:
+        "200":
+          description: PIN set successfully
+
+  /pin/update:
+    post:
+      summary: Update transaction PIN
+      tags: [User]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_pin, new_pin, confirm_new_pin]
+              properties:
+                current_pin: { type: string }
+                new_pin: { type: string }
+                confirm_new_pin: { type: string }
+      responses:
+        "200":
+          description: PIN updated
+
+  /user/referrals:
+    get:
+      summary: Get user referrals
+      tags: [User]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Referral summary
+
+  # ---------------- DEPOSITS ----------------
+  /deposit:
+    post:
+      summary: Initiate deposit
+      tags: [Deposit]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Deposit initiated
+
+  /manual:
+    get:
+      summary: Manual funding info
+      tags: [Deposit]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Manual funding details
+
+  /deposit/callback:
+    get:
+      summary: Deposit callback
+      tags: [Deposit]
+      responses:
+        "200":
+          description: Callback processed
+
+  /monnify/deposit/callback:
+    post:
+      summary: Monnify callback
+      tags: [Deposit]
+      responses:
+        "200":
+          description: Callback processed
+
+  # ---------------- WITHDRAWALS ----------------
+  /withdrawal/request:
+    post:
+      summary: Request withdrawal
+      tags: [Withdrawal]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount:
+                  type: number
+      responses:
+        "200":
+          description: Withdrawal requested
+
+  /withdrawals/{reference}:
+    get:
+      summary: Check withdrawal status
+      tags: [Withdrawal]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: reference
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Withdrawal status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Withdrawal"
+
+  /withdrawal/retry:
+    get:
+      summary: Retry pending withdrawals
+      tags: [Withdrawal]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Withdrawals retried
+
+  # ---------------- WEBHOOKS ----------------
+  /paystack/webhook:
+    post:
+      summary: Paystack webhook
+      tags: [Webhook]
+      responses:
+        "200":
+          description: Webhook accepted
+
+  /autopilot/webhook:
+    post:
+      summary: Autopilot webhook
+      tags: [Webhook]
+      responses:
+        "200":
+          description: Webhook accepted
+
+  # ---------------- NOTIFICATIONS ----------------
+  /notifications:
+    get:
+      summary: Get notifications
+      tags: [Notification]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Notifications retrieved
+
+  /notifications/unread:
+    get:
+      summary: Get unread notifications
+      tags: [Notification]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Unread notifications retrieved
+
+  /notifications/read:
+    post:
+      summary: Mark notifications as read
+      tags: [Notification]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Notifications marked read
+
+  # ---------------- TRANSACTIONS ----------------
+  /airtime/purchase:
+    post:
+      summary: Purchase airtime
+      tags: [Transactions]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [network, phone_number, amount]
+              properties:
+                network: { type: string }
+                phone_number: { type: string }
+                amount: { type: number }
+      responses:
+        "200":
+          description: Airtime purchased
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionResponse"
+
+  /airtime/types:
+    get:
+      summary: Airtime types
+      tags: [Transactions]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Airtime types retrieved
+
+  /airtime/plans:
+    get:
+      summary: Airtime plans
+      tags: [Transactions]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Airtime plans retrieved
+
+  /data/purchase:
+    post:
+      summary: Purchase data
+      tags: [Transactions]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [network, plan_id, phone_number]
+              properties:
+                network: { type: string }
+                plan_id: { type: string }
+                phone_number: { type: string }
+      responses:
+        "200":
+          description: Data purchased
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionResponse"
+
+  /data/types:
+    get:
+      summary: Data types
+      tags: [Transactions]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Data types retrieved
+
+  /data/plans:
+    get:
+      summary: Data plans
+      tags: [Transactions]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Data plans retrieved
+
+  # ---------------- CABLE ----------------
+  /cable/purchase:
+    post:
+      summary: Purchase cable subscription
+      tags: [Transactions]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, plan_id, smartcard_number]
+              properties:
+                provider: { type: string }
+                plan_id: { type: string }
+                smartcard_number: { type: string }
+      responses:
+        "200":
+          description: Cable purchased
+
+  /cable/providers:
+    get:
+      summary: Cable providers
+      tags: [Transactions]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Providers retrieved
+
+  /cable/plans:
+    get:
+      summary: Cable plans
+      tags: [Transactions]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Plans retrieved
+
+  /cable/validate:
+    post:
+      summary: Validate smartcard
+      tags: [Transactions]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, smartcard_number]
+              properties:
+                smartcard_number: { type: string }
+                provider: { type: string }
+      responses:
+        "200":
+          description: Smartcard validated
+
+  # ---------------- BILLERS ----------------
+  /billers:
+    get:
+      summary: Get all billers
+      tags: [Transactions]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Billers retrieved
+
+  /billers/services:
+    post:
+      summary: Get biller services
+      tags: [Transactions]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [biller_id]
+              properties:
+                biller_id: { type: string }
+      responses:
+        "200":
+          description: Services retrieved
+
+  /billers/validate-customer:
+    post:
+      summary: Validate biller customer
+      tags: [Transactions]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customer_id, biller_id]
+              properties:
+                customer_id: { type: string }
+                biller_id: { type: string }
+      responses:
+        "200":
+          description: Customer validated
+
+  /billers/pay:
+    post:
+      summary: Pay bill
+      tags: [Transactions]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [biller_id, service_id, amount]
+              properties:
+                biller_id: { type: string }
+                service_id: { type: string }
+                amount: { type: number }
+      responses:
+        "200":
+          description: Bill paid
+
+  # ---------------- MASKAWASUB ----------------
+  /maskawasub/data:
+    post:
+      summary: Purchase Maskawasub data
+      tags: [Maskawasub]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan_id, phone_number]
+              properties:
+                plan_id: { type: string }
+                phone_number: { type: string }
+      responses:
+        "200":
+          description: Data purchased
+
+  /maskawasub/topup:
+    post:
+      summary: Maskawasub top-up
+      tags: [Maskawasub]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, phone_number]
+              properties:
+                amount: { type: number }
+                phone_number: { type: string }
+      responses:
+        "200":
+          description: Top-up successful
+
+  /maskawasub/bill:
+    post:
+      summary: Pay Maskawasub bill
+      tags: [Maskawasub]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [biller_id, amount, customer_id]
+              properties:
+                biller_id: { type: string }
+                amount: { type: number }
+                customer_id: { type: string }
+      responses:
+        "200":
+          description: Bill paid
+
+  /maskawasub/cable:
+    post:
+      summary: Maskawasub cable purchase
+      tags: [Maskawasub]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, smartcard_number, plan_id]
+              properties:
+                provider: { type: string }
+                smartcard_number: { type: string }
+                plan_id: { type: string }
+      responses:
+        "200":
+          description: Cable processed
+
+  /maskawasub/user:
+    get:
+      summary: Maskawasub user details
+      tags: [Maskawasub]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: User details retrieved
+
+  /maskawasub/validatesmartcard:
+    get:
+      summary: Validate smartcard
+      tags: [Maskawasub]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: smartcard_number
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Smartcard validated
+
+  /maskawasub/validatemeter:
+    get:
+      summary: Validate meter number
+      tags: [Maskawasub]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: meter_number
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Meter validated

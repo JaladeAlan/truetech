@@ -12,18 +12,17 @@ class VerificationController extends Controller
 {
     // Verify the user's email
     public function verify($id, $hash)
-    {
-        $user = User::findOrFail($id);
+{
+    $user = User::findOrFail($id);
 
-        if (hash_equals($hash, sha1($user->getEmailForVerification()))) {
-            $user->markEmailAsVerified();
-            event(new Verified($user));
-
-            return redirect('/home')->with('verified', true);
-        }
-
-        return redirect('/home');
+    if (hash_equals($hash, sha1($user->getEmailForVerification()))) {
+        $user->markEmailAsVerified();
+        event(new Verified($user));
+        return response()->json(['message' => 'Email verified successfully'], 200);
     }
+
+    return response()->json(['error' => 'Email not verified'], 400);
+}
 
     // Resend the verification link
     public function resend(Request $request)
